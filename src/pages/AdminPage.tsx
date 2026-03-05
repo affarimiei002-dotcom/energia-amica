@@ -103,4 +103,4 @@ const AdminPage = () => {
         );
 };
 
-export default AdminPage;</AppLayout>
+export default AdminPage;
