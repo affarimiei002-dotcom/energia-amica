@@ -32,7 +32,9 @@ const AdminPage = () => {
     const runImport = async () => {
           setImporting(true);
           try {
-                  const { data, error } = await supabase.functions.invoke('import-offers');
+                  const r = await fetch('/api/import-offers', { method: 'POST' });
+      const data = await r.json();
+      const error = r.ok ? null : { message: data?.error ?? r.statusText };
                   if (error) throw error;
                   toast({ title: t('admin.importSuccess') });
                   await loadRuns();
@@ -46,7 +48,9 @@ const AdminPage = () => {
     const runEvaluateAlerts = async () => {
           setEvaluating(true);
           try {
-                  const { data, error } = await supabase.functions.invoke('evaluate-alerts');
+                  const r = await fetch('/api/evaluate-alerts', { method: 'POST' });
+      const data = await r.json();
+      const error = r.ok ? null : { message: data?.error ?? r.statusText };
                   if (error) throw error;
                   toast({ title: 'Avvisi generati con successo' });
           } catch (err: any) {
