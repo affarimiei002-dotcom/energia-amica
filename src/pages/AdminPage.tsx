@@ -56,7 +56,7 @@ const AdminPage = () => {
           }
     };
 
-    if (!isAdmin) return <AppLayout><p className="text-destructive">Accesso non autorizzato</p>p></AppLayout>AppLayout>;
+    if (!isAdmin) return <AppLayout><p className="text-destructive">Accesso non autorizzato</p>p></AppLayout>;
   
     return (
           <AppLayout>
@@ -99,7 +99,7 @@ const AdminPage = () => {
                                   </CardContent>CardContent>
                         </Card>Card>
                 </div>div>
-          </AppLayout>AppLayout>
+          </AppLayout>
         );
 };
 
