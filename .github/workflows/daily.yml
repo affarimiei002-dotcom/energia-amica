@@ -1,1 +1,25 @@
+name: Daily import and alerts
 
+on:
+  schedule:
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Import offers
+        run: |
+          curl -sS -X POST "https://energia-amica.vercel.app/api/import-offers" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "content-type: application/json" \
+            --data "{}"
+
+      - name: Evaluate alerts
+        run: |
+          curl -sS -X POST "https://energia-amica.vercel.app/api/evaluate-alerts" \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            -H "content-type: application/json" \
+            --data "{}"
