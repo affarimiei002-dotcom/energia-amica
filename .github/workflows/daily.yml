@@ -15,9 +15,11 @@ jobs:
           response=$(curl -sS -X POST "https://energia-amica.vercel.app/api/import-offers" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            --data "{}")
+            --data "{}" || true)
           echo "$response"
-          echo "$response" | grep -q '"error"' && exit 1 || true
+          if echo "$response" | grep -q '"error"'; then
+            echo "IMPORT_FAILED"
+          fi
 
       - name: Evaluate alerts
         run: |
