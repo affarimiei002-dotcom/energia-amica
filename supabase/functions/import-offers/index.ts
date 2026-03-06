@@ -2,212 +2,293 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// ARERA Portale Offerte Open Data URLs
-const ELECTRICITY_CSV_URL = "https://www.ilportaleofferte.it/portaleOfferte/opendata/csv/offerte_energia_elettrica.csv";
-const GAS_CSV_URL = "https://www.ilportaleofferte.it/portaleOfferte/opendata/csv/offerte_gas.csv";
+const OPEN_DATA_PAGE = "https://www.ilportaleofferte.it/portaleOfferte/it/open-data.page";
+const BASE_URL = "https://www.ilportaleofferte.it";
 
-function parseCSVLine(line: string): string[] {
-  const result: string[] = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === ';' && !inQuotes) {
-      result.push(current.trim());
-      current = '';
-    } else {
-      current += char;
+/**
+ * Fetch the Open Data page and extract the latest PLACET CSV URLs for E and G.
+ * Links look like: /portaleOfferte/resources/opendata/csv/offerte/.../PO_Offerte_E_PLACET_YYYYMMDD.csv
+ */
+async function discoverCsvUrls(): Promise<{ electricityUrl: string; gasUrl: string }> {
+    const resp = await fetch(OPEN_DATA_PAGE);
+    if (!resp.ok) throw new Error(`Cannot fetch open-data page: ${resp.status}`);
+    const html = await resp.text();
+
+  // Extract all href values
+  const hrefRegex = /href="([^"]+opendata\/csv\/offerte[^"]+\.csv)"/g;
+    const electricityLinks: string[] = [];
+    const gasLinks: string[] = [];
+
+  let m: RegExpExecArray | null;
+    while ((m = hrefRegex.exec(html)) !== null) {
+          const href = m[1];
+          if (href.includes('PO_Offerte_E_PLACET')) {
+                  electricityLinks.push(href);
+          } else if (href.includes('PO_Offerte_G_PLACET')) {
+                  gasLinks.push(href);
+          }
     }
-  }
-  result.push(current.trim());
-  return result;
+
+  if (electricityLinks.length === 0) throw new Error("No electricity PLACET CSV found on open-data page");
+    if (gasLinks.length === 0) throw new Error("No gas PLACET CSV found on open-data page");
+
+  // Pick the most recent by sorting descending (YYYYMMDD is in the filename)
+  const pickLatest = (links: string[]) =>
+        links.sort((a, b) => b.localeCompare(a))[0];
+
+  return {
+        electricityUrl: BASE_URL + pickLatest(electricityLinks),
+        gasUrl: BASE_URL + pickLatest(gasLinks),
+  };
 }
 
-async function importDataset(supabaseAdmin: any, url: string, commodity: string): Promise<{ count: number; errors: string[] }> {
-  const errors: string[] = [];
-  let count = 0;
+/**
+ * Parse a CSV line handling quoted fields. Separator = comma.
+ */
+function parseCsvLine(line: string): string[] {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          if (char === '"') {
+                  inQuotes = !inQuotes;
+          } else if (char === ',' && !inQuotes) {
+                  result.push(current.trim());
+                  current = '';
+          } else {
+                  current += char;
+          }
+    }
+    result.push(current.trim());
+    return result;
+}
 
-  try {
-    const response = await fetch(url);
+/**
+ * Strip BOM (UTF-8 BOM = EF BB BF) from a string.
+ */
+function stripBom(text: string): string {
+    return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
+ * Determine price_type from tipo_offerta string.
+ * Portale Offerte values: "prezzo fisso", "prezzo variabile"
+ */
+function parsePriceType(raw: string | undefined): string | null {
+    if (!raw) return null;
+    const v = raw.toLowerCase();
+    if (v.includes('fisso') || v === 'fixed' || v === 'f') return 'fixed';
+    if (v.includes('variabil') || v === 'variable' || v === 'v') return 'variable';
+    return null;
+}
+
+/**
+ * Parse an Italian date dd/MM/yyyy to ISO yyyy-MM-dd, or return null.
+ */
+function parseDate(raw: string | undefined): string | null {
+    if (!raw) return null;
+    const d = raw.trim();
+    const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+    if (d.match(/^\d{4}-\d{2}-\d{2}$/)) return d;
+    return null;
+}
+
+/**
+ * Parse a numeric string (Italian decimal comma OR dot) to float or null.
+ */
+function parseNum(raw: string | undefined): number | null {
+    if (!raw || raw.trim() === '') return null;
+    const n = parseFloat(raw.replace(',', '.'));
+    return isNaN(n) ? null : n;
+}
+
+async function importDataset(
+    supabaseAdmin: ReturnType<typeof createClient>,
+    url: string,
+    commodity: 'power' | 'gas',
+  ): Promise<{ count: number; errors: string[] }> {
+    const errors: string[] = [];
+    let count = 0;
+
+  const response = await fetch(url);
     if (!response.ok) {
-      errors.push(`Failed to fetch ${commodity} data: ${response.status} ${response.statusText}`);
-      return { count, errors };
+          errors.push(`HTTP ${response.status} fetching ${url}`);
+          return { count, errors };
     }
 
-    const text = await response.text();
-    const lines = text.split('\n').filter(l => l.trim());
-    if (lines.length < 2) {
-      errors.push(`No data rows in ${commodity} CSV`);
-      return { count, errors };
-    }
+  const raw = stripBom(await response.text());
+    const lines = raw.split('\n').map(l => l.trimEnd()).filter(l => l.length > 0);
 
-    const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/\s+/g, '_'));
-    
-    // Find relevant column indices
-    const idIdx = headers.findIndex(h => h.includes('codice_offerta') || h.includes('id_offerta') || h === 'id');
-    const supplierIdx = headers.findIndex(h => h.includes('operatore') || h.includes('fornitore') || h.includes('venditore'));
-    const nameIdx = headers.findIndex(h => h.includes('nome_offerta') || h.includes('denominazione'));
-    const priceTypeIdx = headers.findIndex(h => h.includes('tipo_prezzo') || h.includes('prezzo_fisso'));
-    const priceIdx = headers.findIndex(h => h.includes('prezzo') || h.includes('costo_unitario') || h.includes('spesa_materia'));
-    const feeIdx = headers.findIndex(h => h.includes('quota_fissa') || h.includes('costo_fisso'));
-    const urlIdx = headers.findIndex(h => h.includes('link') || h.includes('url'));
-    const validFromIdx = headers.findIndex(h => h.includes('data_inizio') || h.includes('data_decorrenza'));
-    const validToIdx = headers.findIndex(h => h.includes('data_fine') || h.includes('data_scadenza'));
+  if (lines.length < 2) {
+        errors.push(`No data rows in ${commodity} CSV (${url})`);
+        return { count, errors };
+  }
 
-    const batchSize = 100;
-    const offers: any[] = [];
+  const headers = parseCsvLine(lines[0]).map(h => h.toLowerCase().replace(/\s+/g, '_'));
 
-    for (let i = 1; i < Math.min(lines.length, 500); i++) { // Limit to 500 for MVP
-      try {
-        const fields = parseCSVLine(lines[i]);
-        if (fields.length < 3) continue;
-
-        const sourceOfferId = idIdx >= 0 ? fields[idIdx] : `${commodity}-${i}`;
-        const supplierName = supplierIdx >= 0 ? fields[supplierIdx] : 'Sconosciuto';
-        const offerName = nameIdx >= 0 ? fields[nameIdx] : `Offerta ${i}`;
-        
-        if (!sourceOfferId || !supplierName) continue;
-
-        let priceType: string | null = null;
-        if (priceTypeIdx >= 0) {
-          const pt = fields[priceTypeIdx]?.toLowerCase();
-          if (pt?.includes('fisso') || pt === 'f') priceType = 'fixed';
-          else if (pt?.includes('variabil') || pt === 'v') priceType = 'variable';
+  // Column indices – Portale Offerte PLACET schema
+  const idx = (names: string[]) => {
+        for (const n of names) {
+                const i = headers.indexOf(n);
+                if (i >= 0) return i;
         }
-
-        let unitPrice: number | null = null;
-        if (priceIdx >= 0) {
-          const p = parseFloat(fields[priceIdx]?.replace(',', '.'));
-          if (!isNaN(p) && p > 0 && p < 10) unitPrice = p;
+        // fallback: partial match
+        for (const n of names) {
+                const i = headers.findIndex(h => h.includes(n));
+                if (i >= 0) return i;
         }
+        return -1;
+  };
 
-        let fixedFee: number | null = null;
-        if (feeIdx >= 0) {
-          const f = parseFloat(fields[feeIdx]?.replace(',', '.'));
-          if (!isNaN(f)) fixedFee = f;
+  const iSupplier   = idx(['denominazione']);
+    const iName       = idx(['nome_offerta']);
+    const iCode       = idx(['cod_offerta']);
+    const iPriceType  = idx(['tipo_offerta']);
+    const iFixPart    = idx(['p_fix_f', 'p_fix_v']);  // quota fissa (€/anno or €/mese)
+  // unit price: electricity has p_vol_mono or p_vol_f1; gas has p_vol
+  const iUnitPrice  = commodity === 'power'
+      ? idx(['p_vol_mono', 'p_vol_f1', 'p_vol_f2'])
+        : idx(['p_vol']);
+    const iUrlOffer   = idx(['url_offerta']);
+    const iValidFrom  = idx(['data_inizio']);
+    const iValidTo    = idx(['data_fine']);
+
+  const batchSize = 200;
+    const offers: Record<string, unknown>[] = [];
+
+  // Process all rows (no artificial cap)
+  for (let i = 1; i < lines.length; i++) {
+        try {
+                const fields = parseCsvLine(lines[i]);
+                if (fields.length < 3) continue;
+
+          const supplierName = iSupplier >= 0 ? fields[iSupplier] || 'Sconosciuto' : 'Sconosciuto';
+                const offerName    = iName >= 0     ? fields[iName]     || `Offerta ${i}` : `Offerta ${i}`;
+                const sourceId     = iCode >= 0     ? fields[iCode]     || `${commodity}-${i}` : `${commodity}-${i}`;
+
+          if (!sourceId) continue;
+
+          const priceType   = parsePriceType(iPriceType >= 0 ? fields[iPriceType] : undefined);
+                const unitPrice   = parseNum(iUnitPrice >= 0 ? fields[iUnitPrice] : undefined);
+                const fixedFee    = parseNum(iFixPart >= 0 ? fields[iFixPart] : undefined);
+                const urlOffer    = iUrlOffer >= 0 ? (fields[iUrlOffer] || null) : null;
+                const validFrom   = parseDate(iValidFrom >= 0 ? fields[iValidFrom] : undefined);
+                const validTo     = parseDate(iValidTo >= 0 ? fields[iValidTo] : undefined);
+
+          offers.push({
+                    source: 'PORTALE_OFFERTE',
+                    source_offer_id: sourceId,
+                    commodity,
+                    supplier_name: supplierName,
+                    offer_name: offerName,
+                    price_type: priceType,
+                    unit_price_est: unitPrice,
+                    fixed_fee_monthly_est: fixedFee != null ? fixedFee / 12 : null, // annuale → mensile
+                    url_offer: urlOffer,
+                    valid_from: validFrom,
+                    valid_to: validTo,
+                    raw: Object.fromEntries(headers.map((h, j) => [h, fields[j] ?? null])),
+                    imported_at: new Date().toISOString(),
+          });
+                count++;
+        } catch (e: unknown) {
+                errors.push(`Row ${i}: ${(e as Error).message}`);
         }
+  }
 
-        const urlOffer = urlIdx >= 0 ? fields[urlIdx] || null : null;
-
-        let validFrom: string | null = null;
-        if (validFromIdx >= 0 && fields[validFromIdx]) {
-          const d = fields[validFromIdx].trim();
-          if (d.match(/\d{2}\/\d{2}\/\d{4}/)) {
-            const [dd, mm, yyyy] = d.split('/');
-            validFrom = `${yyyy}-${mm}-${dd}`;
-          } else if (d.match(/\d{4}-\d{2}-\d{2}/)) {
-            validFrom = d;
-          }
+  // Batch upsert
+  for (let i = 0; i < offers.length; i += batchSize) {
+        const batch = offers.slice(i, i + batchSize);
+        const { error } = await supabaseAdmin
+          .from('offers')
+          .upsert(batch, { onConflict: 'source,source_offer_id' });
+        if (error) {
+                errors.push(`Batch upsert (${commodity} rows ${i}–${i + batchSize}): ${error.message}`);
         }
-
-        let validTo: string | null = null;
-        if (validToIdx >= 0 && fields[validToIdx]) {
-          const d = fields[validToIdx].trim();
-          if (d.match(/\d{2}\/\d{2}\/\d{4}/)) {
-            const [dd, mm, yyyy] = d.split('/');
-            validTo = `${yyyy}-${mm}-${dd}`;
-          } else if (d.match(/\d{4}-\d{2}-\d{2}/)) {
-            validTo = d;
-          }
-        }
-
-        offers.push({
-          source: 'PORTALE_OFFERTE',
-          source_offer_id: sourceOfferId,
-          commodity,
-          supplier_name: supplierName,
-          offer_name: offerName,
-          price_type: priceType,
-          unit_price_est: unitPrice,
-          fixed_fee_monthly_est: fixedFee,
-          url_offer: urlOffer,
-          valid_from: validFrom,
-          valid_to: validTo,
-          raw: Object.fromEntries(headers.map((h, idx) => [h, fields[idx] || null])),
-          imported_at: new Date().toISOString(),
-        });
-
-        count++;
-      } catch (e) {
-        errors.push(`Row ${i}: ${e.message}`);
-      }
-    }
-
-    // Batch upsert
-    for (let i = 0; i < offers.length; i += batchSize) {
-      const batch = offers.slice(i, i + batchSize);
-      const { error } = await supabaseAdmin.from('offers').upsert(batch, { onConflict: 'source,source_offer_id' });
-      if (error) {
-        errors.push(`Batch upsert error: ${error.message}`);
-      }
-    }
-  } catch (e) {
-    errors.push(`${commodity} import error: ${e.message}`);
   }
 
   return { count, errors };
 }
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
+    if (req.method === 'OPTIONS') {
+          return new Response(null, { headers: corsHeaders });
+    }
 
-  const supabaseAdmin = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-  );
+        const supabaseAdmin = createClient(
+              Deno.env.get('SUPABASE_URL')!,
+              Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+            );
 
-  // Create import run record
-  const { data: run } = await supabaseAdmin.from('import_runs').insert({
-    status: 'running',
-    source: 'PORTALE_OFFERTE',
-  }).select().single();
+        // Create import run record
+        const { data: run, error: runErr } = await supabaseAdmin
+      .from('import_runs')
+      .insert({ status: 'running', source: 'PORTALE_OFFERTE' })
+      .select()
+      .single();
 
-  const allErrors: string[] = [];
-  let totalCount = 0;
+        if (runErr) {
+              return new Response(JSON.stringify({ success: false, error: `Cannot create import_run: ${runErr.message}` }), {
+                      status: 500,
+                      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+              });
+        }
 
-  try {
-    // Import electricity offers
-    const elecResult = await importDataset(supabaseAdmin, ELECTRICITY_CSV_URL, 'electricity');
-    totalCount += elecResult.count;
-    allErrors.push(...elecResult.errors);
+        const allErrors: string[] = [];
+    let totalCount = 0;
+    let electricityUrl = '';
+    let gasUrl = '';
 
-    // Import gas offers
-    const gasResult = await importDataset(supabaseAdmin, GAS_CSV_URL, 'gas');
-    totalCount += gasResult.count;
-    allErrors.push(...gasResult.errors);
+        try {
+              // Discover latest CSV URLs dynamically
+      const urls = await discoverCsvUrls();
+              electricityUrl = urls.electricityUrl;
+              gasUrl = urls.gasUrl;
 
-    // Update import run
-    await supabaseAdmin.from('import_runs').update({
-      finished_at: new Date().toISOString(),
-      status: allErrors.length > 0 && totalCount === 0 ? 'failure' : 'success',
-      errors: allErrors.length > 0 ? { errors: allErrors } : null,
-    }).eq('id', run.id);
+      // Import electricity (commodity = 'power')
+      const elecResult = await importDataset(supabaseAdmin, electricityUrl, 'power');
+              totalCount += elecResult.count;
+              allErrors.push(...elecResult.errors);
 
-    return new Response(JSON.stringify({
-      success: true,
-      imported: totalCount,
-      errors: allErrors,
-    }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  } catch (e) {
-    await supabaseAdmin.from('import_runs').update({
-      finished_at: new Date().toISOString(),
-      status: 'failure',
-      errors: { errors: [e.message] },
-    }).eq('id', run.id);
+      // Import gas (commodity = 'gas')
+      const gasResult = await importDataset(supabaseAdmin, gasUrl, 'gas');
+              totalCount += gasResult.count;
+              allErrors.push(...gasResult.errors);
 
-    return new Response(JSON.stringify({ success: false, error: e.message }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  }
+      await supabaseAdmin.from('import_runs').update({
+              finished_at: new Date().toISOString(),
+              status: allErrors.length > 0 && totalCount === 0 ? 'failure' : 'success',
+              count: totalCount,
+              errors: allErrors.length > 0 ? { errors: allErrors } : null,
+      }).eq('id', run.id);
+
+      return new Response(JSON.stringify({
+              success: true,
+              imported: totalCount,
+              electricity_url: electricityUrl,
+              gas_url: gasUrl,
+              errors: allErrors,
+      }), {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+
+        } catch (e: unknown) {
+    const msg = (e as Error).message;
+              await supabaseAdmin.from('import_runs').update({
+                      finished_at: new Date().toISOString(),
+                      status: 'failure',
+                      errors: { errors: [msg] },
+              }).eq('id', run.id);
+
+      return new Response(JSON.stringify({ success: false, error: msg }), {
+              status: 500,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+        }
 });
