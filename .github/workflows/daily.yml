@@ -12,14 +12,18 @@ jobs:
     steps:
       - name: Import offers
         run: |
-          curl -sS -X POST "https://energia-amica.vercel.app/api/import-offers" \
+          response=$(curl -sS -X POST "https://energia-amica.vercel.app/api/import-offers" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            --data "{}"
+            --data "{}")
+          echo "$response"
+          echo "$response" | grep -q '"error"' && exit 1 || true
 
       - name: Evaluate alerts
         run: |
-          curl -sS -X POST "https://energia-amica.vercel.app/api/evaluate-alerts" \
+          response=$(curl -sS -X POST "https://energia-amica.vercel.app/api/evaluate-alerts" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -H "content-type: application/json" \
-            --data "{}"
+            --data "{}")
+          echo "$response"
+          echo "$response" | grep -q '"error"' && exit 1 || true
