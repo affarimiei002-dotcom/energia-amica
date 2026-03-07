@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
 import { t } from '@/i18n';
 import { Zap } from 'lucide-react';
+
+const TURNSTILE_SCRIPT_ID = 'cf-turnstile-script';
 
 const AuthPage = () => {
   const { signIn, signUp, resetPassword } = useAuth();
@@ -21,6 +23,17 @@ const AuthPage = () => {
   const [signupPassword, setSignupPassword] = useState('');
   const [showForgot, setShowForgot] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
+
+  useEffect(() => {
+    if (!document.getElementById(TURNSTILE_SCRIPT_ID)) {
+      const script = document.createElement('script');
+      script.id = TURNSTILE_SCRIPT_ID;
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    }
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,6 +53,22 @@ const AuthPage = () => {
     e.preventDefault();
     setLoading(true);
     try {
+      const token = (document.querySelector('textarea[name="cf-turnstile-response"]') as HTMLTextAreaElement | null)?.value;
+      if (!token) {
+        toast({ title: t('common.error'), description: 'Completa il controllo anti-bot prima di procedere.', variant: 'destructive' });
+        setLoading(false);
+        return;
+      }
+      const verifyRes = await fetch('/api/verify-turnstile', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      if (!verifyRes.ok) {
+        toast({ title: t('common.error'), description: 'Verifica anti-bot fallita. Riprova.', variant: 'destructive' });
+        setLoading(false);
+        return;
+      }
       await signUp(signupEmail, signupPassword);
       toast({ title: t('auth.signupSuccess') });
     } catch (err: any) {
@@ -137,6 +166,7 @@ const AuthPage = () => {
                   <Label htmlFor="signup-password">{t('auth.password')}</Label>
                   <Input id="signup-password" type="password" value={signupPassword} onChange={e => setSignupPassword(e.target.value)} required minLength={6} />
                 </div>
+                <div className="cf-turnstile" data-sitekey={import.meta.env.VITE_TURNSTILE_SITE_KEY}></div>
                 <Button type="submit" className="w-full" disabled={loading}>
                   {loading ? t('common.loading') : t('auth.signup')}
                 </Button>
