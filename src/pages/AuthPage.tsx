@@ -17,8 +17,10 @@ const SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY as string;
 /** Render Turnstile widget with retry (max 10 attempts, 300ms apart).
  *  Skips render if the textarea token is already present (widget already rendered). */
 function renderTurnstile(attempt = 0) {
-  // Guard: already rendered
-  if (document.querySelector('textarea[name="cf-turnstile-response"]')) return;
+  // Guard: already rendered (token present or iframe already injected)
+  const hasToken = !!document.querySelector('textarea[name="cf-turnstile-response"]');
+  const hasIframe = !!document.querySelector('#turnstile-container iframe');
+  if (hasToken || hasIframe) return;
 
   const container = document.getElementById(TURNSTILE_CONTAINER_ID);
   if (!container) return;
