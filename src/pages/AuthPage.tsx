@@ -84,7 +84,10 @@ const AuthPage = () => {
     e.preventDefault();
     setLoading(true);
     try {
-      const token = (document.querySelector('textarea[name="cf-turnstile-response"]') as HTMLTextAreaElement | null)?.value;
+      const token =
+        (window as any).turnstile?.getResponse?.('#turnstile-container') ||
+        (document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null)?.value ||
+        (document.querySelector('textarea[name="cf-turnstile-response"]') as HTMLTextAreaElement | null)?.value;
       if (!token) {
         toast({ title: t('common.error'), description: 'Completa il controllo anti-bot prima di procedere.', variant: 'destructive' });
         setLoading(false);
@@ -105,6 +108,7 @@ const AuthPage = () => {
     } catch (err: any) {
       toast({ title: t('common.error'), description: err.message, variant: 'destructive' });
     } finally {
+      (window as any).turnstile?.reset?.('#turnstile-container');
       setLoading(false);
     }
   };
