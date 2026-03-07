@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -11,6 +11,26 @@ import { t } from '@/i18n';
 import { Zap } from 'lucide-react';
 
 const TURNSTILE_SCRIPT_ID = 'cf-turnstile-script';
+const TURNSTILE_CONTAINER_ID = 'turnstile-container';
+const SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY as string;
+
+/** Render Turnstile widget with retry (max 10 attempts, 300ms apart).
+ *  Skips render if the textarea token is already present (widget already rendered). */
+function renderTurnstile(attempt = 0) {
+  // Guard: already rendered
+  if (document.querySelector('textarea[name="cf-turnstile-response"]')) return;
+
+  const container = document.getElementById(TURNSTILE_CONTAINER_ID);
+  if (!container) return;
+
+  const ts = (window as any).turnstile;
+  if (ts && typeof ts.render === 'function') {
+    container.innerHTML = '';
+    ts.render('#' + TURNSTILE_CONTAINER_ID, { sitekey: SITE_KEY });
+  } else if (attempt < 10) {
+    setTimeout(() => renderTurnstile(attempt + 1), 300);
+  }
+}
 
 const AuthPage = () => {
   const { signIn, signUp, resetPassword } = useAuth();
@@ -23,7 +43,9 @@ const AuthPage = () => {
   const [signupPassword, setSignupPassword] = useState('');
   const [showForgot, setShowForgot] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
+  const [activeTab, setActiveTab] = useState('login');
 
+  // Load script once
   useEffect(() => {
     if (!document.getElementById(TURNSTILE_SCRIPT_ID)) {
       const script = document.createElement('script');
@@ -34,6 +56,13 @@ const AuthPage = () => {
       document.head.appendChild(script);
     }
   }, []);
+
+  // Render widget every time signup tab becomes active
+  useEffect(() => {
+    if (activeTab === 'signup') {
+      renderTurnstile();
+    }
+  }, [activeTab]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,7 +162,7 @@ const AuthPage = () => {
           <CardDescription>{t('app.tagline')}</CardDescription>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="login">
+          <Tabs defaultValue="login" onValueChange={setActiveTab}>
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="login">{t('auth.login')}</TabsTrigger>
               <TabsTrigger value="signup">{t('auth.signup')}</TabsTrigger>
@@ -166,7 +195,7 @@ const AuthPage = () => {
                   <Label htmlFor="signup-password">{t('auth.password')}</Label>
                   <Input id="signup-password" type="password" value={signupPassword} onChange={e => setSignupPassword(e.target.value)} required minLength={6} />
                 </div>
-                <div className="cf-turnstile" data-sitekey={import.meta.env.VITE_TURNSTILE_SITE_KEY}></div>
+                <div id={TURNSTILE_CONTAINER_ID} className="cf-turnstile" data-sitekey={SITE_KEY}></div>
                 <Button type="submit" className="w-full" disabled={loading}>
                   {loading ? t('common.loading') : t('auth.signup')}
                 </Button>
